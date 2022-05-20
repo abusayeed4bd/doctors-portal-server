@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+let jwt = require("jsonwebtoken");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 require("dotenv").config();
 const app = express();
@@ -17,6 +18,20 @@ const client = new MongoClient(uri, {
   useUnifiedTopology: true,
   serverApi: ServerApiVersion.v1,
 });
+function verifyJWT(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    res.status(401).send({ message: "unAuthorized access" });
+  }
+  const token = authHeader.split(" ")[1];
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, function (err, decoded) {
+    if (err) {
+      return res.status(403).send({ message: "Forbidden access" });
+    }
+    req.decoded = decoded;
+    next();
+  });
+}
 async function run() {
   try {
     await client.connect();
@@ -25,6 +40,7 @@ async function run() {
       .db("doctors_portal")
       .collection("services");
     const bookingCollection = client.db("doctors_portal").collection("booking");
+    const userCollection = client.db("doctors_portal").collection("users");
 
     app.get("/service", async (req, res) => {
       const query = {};
@@ -33,21 +49,105 @@ async function run() {
       res.send(services);
     });
 
-    // booking
+    // booking api
+    //  get  booking
+    app.get("/booking", verifyJWT, async (req, res) => {
+      const patient = req.query.patient;
+      const decodedEmail = req.decoded.email;
+      if (decodedEmail === patient) {
+        const query = { patient: patient };
+        const bookings = await bookingCollection.find(query).toArray();
+        return res.send(bookings);
+      } else {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+    });
+    // booking post
     app.post("/booking", async (req, res) => {
       const booking = req.body;
-      const result = await bookingCollection.insertOne(booking);
+      const query = {
+        treatment: booking.treatment,
+        date: booking.date,
+        patient: booking.patient,
+      };
+      const exists = await bookingCollection.findOne(query);
+      if (exists) {
+        return res.send({ success: false, booking: exists });
+      } else {
+        const result = await bookingCollection.insertOne(booking);
+        return res.send({ success: true, result });
+      }
+    });
+
+    // available
+    app.get("/available", async (req, res) => {
+      const date = req.query.date;
+
+      const services = await serviceCollection.find().toArray();
+
+      const query = { date: date };
+      const bookings = await bookingCollection.find(query).toArray();
+
+      services.forEach((service) => {
+        const serviceBookings = bookings.filter(
+          (book) => book.treatment === service.name
+        );
+
+        const bookedSlots = serviceBookings.map((book) => book.slot);
+
+        const available = service.slots.filter(
+          (slot) => !bookedSlots.includes(slot)
+        );
+
+        service.slots = available;
+      });
+
+      res.send(services);
+    });
+
+    //  users api
+    app.get("/user", verifyJWT, async (req, res) => {
+      const user = await userCollection.find().toArray();
+      res.send(user);
+    });
+
+    app.put("/user/admin/:email", verifyJWT, async (req, res) => {
+      const email = req.params.email;
+
+      const filter = { email: email };
+      // const options = { upsert: true };
+      const updateDoc = {
+        $set: { role: "admin" },
+      };
+      const result = await userCollection.updateOne(filter, updateDoc);
+      // const token = jwt.sign(
+      //   { email: email },
+      //   process.env.ACCESS_TOKEN_SECRET,
+      //   { expiresIn: "1h" }
+      // );
       res.send(result);
+    });
+
+    app.put("/user/:email", async (req, res) => {
+      const email = req.params.email;
+      const user = req.body;
+      const filter = { email: email };
+      const options = { upsert: true };
+      const updateDoc = {
+        $set: user,
+      };
+      const result = await userCollection.updateOne(filter, updateDoc, options);
+      const token = jwt.sign(
+        { email: email },
+        process.env.ACCESS_TOKEN_SECRET,
+        { expiresIn: "1h" }
+      );
+      res.send({ result, token });
     });
   } finally {
   }
 }
 run().catch(console.dir);
-// client.connect((err) => {
-//   const collection = client.db("test").collection("devices");
-//   // perform actions on the collection object
-//   client.close();
-// });
 
 app.get("/", (req, res) => {
   res.send("Hello from doctor's portal client");
